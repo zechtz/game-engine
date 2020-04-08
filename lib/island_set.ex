@@ -1,5 +1,5 @@
 defmodule IslandsEngine.IslandSet do
-  alias IslandsEngine.{Island, IslandSet}
+  alias IslandsEngine.{Island, IslandSet, Coordinate}
 
   defstruct atoll: :none, dot: :none, l_shape: :none, s_shape: :none, square: :none
 
@@ -9,6 +9,24 @@ defmodule IslandsEngine.IslandSet do
 
   def to_string(island_set) do
     "%IslandSet{" <> string_body(island_set) <> "}"
+  end
+
+  def set_island_coordinates(island_set, island_key, new_coordinates) do
+    island = Agent.get(island_set, fn state -> Map.get(state, island_key) end)
+    original_coordinates = Agent.get(Island, fn state -> state end)
+    Island.replace_coordinates(island, new_coordinates)
+    Coordinate.set_all_in_island(original_coordinates, :none)
+    Coordinate.set_all_in_island(new_coordinates, island_key)
+  end
+
+  def forested?(_island_set, :none) do
+    false
+  end
+
+  def forested?(island_set, island_key) do
+    island_set
+    |> Agent.get(fn state -> Map.get(state, island_key) end)
+    |> Island.forested?
   end
 
   defp initialized_set do
