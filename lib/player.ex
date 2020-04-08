@@ -17,6 +17,52 @@ defmodule IslandsEngine.Player do
     "%Player{" <> string_body(player) <> "}"
   end
 
+  def get_board(player) do
+    Agent.get(player, fn state -> state.board end)
+  end
+
+  def get_island_set(player) do
+    Agent.get(player, fn state -> state.island_set end)
+  end
+
+  def set_island_coordinates(player, island, coordinates) do
+    board = player |> Player.get_board
+    island_set = player |> Player.get_island_set
+    new_coordinates = convert_coordinates(board, coordinates)
+    IslandSet.set_island_coordinates(island_set, island, new_coordinates)
+  end
+
+  def guess_coordinate(opponet_board, coordinate) do
+    Board.guess_coordinate(opponet_board, coordinate)
+    case Board.coordinate_hit?(opponet_board, coordinate) do
+      true  -> :hit
+      false -> :miss
+    end
+  end
+
+  def forested_island(opponet, coordinate) do
+    board = Player.get_board(opponet)
+    island_key = Board.coordinate_island(board, coordinate)
+    island_set = Player.get_island_set(opponet)
+
+    case IslandSet.forested?(island_set, island_key) do
+      true  -> island_key
+      false -> :none
+    end
+  end
+
+  defp convert_coordinates(board, coordinates) do
+    Enum.map(coordinates, fn coord -> convert_coordinate(board, coord) end)
+  end
+
+  defp convert_coordinate(board, coordinate) when is_atom coordinate do
+    Board.get_coordinate(board, coordinate)
+  end
+
+  defp convert_coordinate(_board, coordinate) when is_pid coordinate do
+    coordinate
+  end
+
   defp string_body(player) do
     state = Agent.get(player, &(&1))
     ":name => " <> name_to_string(state.name) <> ",\n" <>
