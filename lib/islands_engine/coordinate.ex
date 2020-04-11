@@ -1,10 +1,18 @@
 defmodule IslandsEngine.Coordinate do
-  defstruct in_island: :none, guessed?: false
+  alias __MODULE__
+  @enforce_keys [:row, :col]
+  @board_range 1..10
 
-  alias IslandsEngine.Coordinate
+  defstruct [:row, :col]
+
+  def new(row, col) when row in(@board_range) and col in(@board_range) do
+    {:ok, %Coordinate{row: row, col: col}}
+  end
+
+  def new(_row, _col), do: {:error, :invalid_coordinate}
 
   def start_link do
-    Agent.start_link(fn -> %Coordinate{} end)
+    #Agent.start_link(fn -> %Coordinate{} end)
   end
 
   def guessed?(coordinate) do

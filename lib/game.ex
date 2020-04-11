@@ -1,32 +1,50 @@
 defmodule IslandsEngine.Game do
+  @players [:player1, :player2]
+
   defstruct player1: :none, player2: :none
 
   use GenServer
 
-  alias IslandsEngine.{Game, Player}
+  alias IslandsEngine.{Board, Rules, Guesses, Island, Coordinate}
 
-  def start_link(name) when not is_nil name do
-    GenServer.start_link(__MODULE__, name)
+  def start_link(name) when is_binary(name) do
+    GenServer.start_link(__MODULE__, name, name: via_tuple(name))
   end
 
   def init(name) do
-    {:ok, player1} = Player.start_link(name)
-    {:ok, player2} = Player.start_link()
-    {:ok, %Game{player1: player1, player2: player2}}
+    player1 = %{name: name, board: Board.new(), guesses: Guesses.new()}
+    player2 = %{name: nil, board: Board.new(), guesses: Guesses.new()}
+    {:ok, %{player1: player1, player2: player2, rules: %Rules{}}}
+  end
+
+  def stop(pid) do
+    GenServer.cast(pid, :stop)
   end
 
   # Public API
-  def add_player(pid, name) when name != nil do
-    GenServer.call(pid, {:add_player, name})
+  def add_player(game, name) when is_binary(name) do
+    GenServer.call(game, {:add_player, name})
   end
 
   def set_island_coordinates(pid, player, island, coordinates) when is_atom player and is_atom island do
     GenServer.call(pid, {:set_island_coordinates, player, island, coordinates })
   end
 
-  def guess_coordinate(pid, player, coordinate) when is_atom player and is_atom coordinate do 
-    GenServer.call(pid, {:guess, player, coordinate})
+  def guess_coordinate(game, player, row, col) when player in @players do
+    GenServer.call(game, {:guess_coordinate, player, row, col})
   end
+
+  def position_island(game, player, key, row, col) when player in @players do
+    GenServer.call(game, {:position_island, player, key, row, col})
+  end
+
+  def player_board(state_data, player), do: Map.get(state_data, player).board
+
+  def set_islands(game, player) when player in @players do
+    GenServer.call(game, {:set_islands, player})
+  end
+
+  def via_tuple(name), do: {:via, Registry, {Registry.Game, name}}
 
   def call_demo(game) do
     GenServer.call(game, :demo)
@@ -47,58 +65,102 @@ defmodule IslandsEngine.Game do
     {:reply, state, state}
   end
 
-  def handle_call({:add_player, name}, _from, state) do
-    Player.set_name(state.player2, name)
-    {:reply, :ok, state}
+  def handle_call({:add_player, name}, _from, state_data) do
+    with {:ok, rules} <- Rules.check(state_data.rules, :add_player)
+    do
+      state_data
+      |> update_player2_name(name)
+      |> update_rules(rules)
+      |> reply_success(:ok)
+    else
+      :error -> {:reply, :error, state_data}
+    end
   end
 
-  def handle_call({:set_island_coordinates, player, island, coordinates}, _from, state) do
-    state
-    |> Map.get(player)
-    |> Player.set_island_coordinates(island, coordinates)
-    {:reply, :ok, state}
+  def handle_call({:position_island, player, key, row, col}, _from, state_data) do
+    board = player_board(state_data, player)
+    with {:ok, rules} <-
+           Rules.check(state_data.rules, {:position_islands, player}),
+         {:ok, coordinate} <-
+           Coordinate.new(row, col),
+         {:ok, island} <-
+           Island.new(key, coordinate),
+         %{} = board <-
+           Board.position_island(board, key, island)
+    do
+      state_data
+      |> update_board(player, board)
+      |> update_rules(rules)
+      |> reply_success(:ok)
+    else
+      :error ->
+        {:reply, :error, state_data}
+      {:error, :invalid_coordinate} ->
+        {:reply, {:error, :invalid_coordinate}, state_data}
+      {:error, :invalid_island_type} ->
+        {:reply, {:error, :invalid_island_type}, state_data}
+    end
   end
 
-  def handle_call({:guess, player, coordinate}, _from, state) do
-    opponet = opponet(state, player)
-    opponet_board = Player.get_board(opponet)
-    response =
-      Player.guess_coordinate(opponet_board, coordinate)
-      |> forest_check(opponet, coordinate)
-      |> win_check(opponet, state)
+  def handle_call({:set_islands, player}, _from, state_data) do
+    board = player_board(state_data, player)
+    with {:ok, rules} <- Rules.check(state_data.rules, {:set_islands, player}),
+         true         <- Board.all_islands_positioned?(board)
+    do
+      state_data
+      |> update_rules(rules)
+      |> reply_success({:ok, board})
+    else
+      :error -> {:reply, :error, state_data}
+      false  -> {:reply, {:error, :not_all_islands_positioned}, state_data}
+    end
   end
 
-  def handle_cast(:demo, state) do
-    {:noreply, %{state | test: "new value"}}
+  def handle_call({:guess_coordinate, player_key, row, col}, _from, state_data) do
+    opponent_key = opponent(player_key)
+    opponent_board = player_board(state_data, opponent_key)
+
+    with {:ok, rules} <-
+           Rules.check(state_data.rules, {:guess_coordinate, player_key}),
+         {:ok, coordinate} <-
+           Coordinate.new(row, col),
+         {hit_or_miss, forested_island, win_status, opponent_board} <-
+           Board.guess(opponent_board, coordinate),
+         {:ok, rules} <-
+           Rules.check(rules, {:win_check, win_status})
+    do
+      state_data
+      |> update_board(opponent_key, opponent_board)
+      |> update_guesses(player_key, hit_or_miss, coordinate)
+      |> update_rules(rules)
+      |> reply_success({hit_or_miss, forested_island, win_status})
+    else
+      :error ->
+        {:reply, :error, state_data}
+      {:error, :invalid_coordinate} ->
+        {:reply, {:error, :invalid_coordinate}, state_data}
+    end
   end
 
-  defp win_check({hit_or_miss, :none}, _oppoent, state) do
-    {:reply, {hit_or_miss, :none, :no_win}, state}
+  defp update_player2_name(state_data, name) do
+    put_in(state_data.player2.name, name)
   end
 
-  defp win_check({:hit, island_key}, opponet, state) do
-    win_status =
-      case Player.win?(opponet) do
-        true  -> :win
-        false -> :no_win
-      end
-    {:reply, {:hit, island_key, win_status}, state}
+  defp update_board(state_data, player, board) do
+    Map.update! state_data, player, fn(player) ->
+      %{player | board: board}
+    end
   end
 
-  defp opponet(state, :player1) do
-    state.player2
+  defp update_guesses(state_data, player_key, hit_or_miss, coordinate) do
+    update_in state_data[player_key].guesses, fn guesses ->
+      Guesses.add(guesses, hit_or_miss, coordinate)
+    end
   end
 
-  defp opponet(state, :player2) do
-    state.player1
-  end
+  defp update_rules(state_data, rules), do: %{state_data | rules: rules}
+  defp reply_success(state_data, reply), do: {:reply, reply, state_data}
 
-  defp forest_check(:miss, _oppoent, _coordinate) do
-    {:miss, :none}
-  end
-
-  defp forest_check(:hit, opponet, coordinate) do
-    island_key = Player.forested_island(opponet, coordinate)
-    {:hit, island_key}
-  end
+  defp opponent(:player1), do: :player2
+  defp opponent(:player2), do: :player1
 end
